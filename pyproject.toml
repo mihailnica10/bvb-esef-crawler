@@ -1,0 +1,28 @@
+[project]
+name = "bvb-esef-scraper"
+version = "0.2.0"
+description = "BVB/IRIS ESEF .zip scraper + ingestion pipeline (filings.xbrl.org compatible)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.27",
+  "beautifulsoup4>=4.12",
+  "lxml>=5.0",
+  "click>=8.1",
+  "tqdm>=4.66",
+  "python-dateutil>=2.9",
+]
+optional-dependencies = { dev = ["pytest>=8", "ruff>=0.4"] }
+
+[project.scripts]
+bvb-esef = "bvb_esef.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py310"

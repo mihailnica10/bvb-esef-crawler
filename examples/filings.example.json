@@ -1,0 +1,21 @@
+{
+  "filings": [
+    {
+      "entity": {
+        "lei": "213800P4SUNUM5AUDX61",
+        "name": "SOCIETATEA ENERGETICA ELECTRICA S.A.",
+        "ticker": "EL",
+        "country": "RO"
+      },
+      "report": {
+        "filing_url": "https://bvb.ro/infocont/infocont23/EL_20230428175526_213800P4SUNUM5AUDX61-2022-12-31-ro.zip",
+        "filing_date": "2023-04-28",
+        "period_end": "2022-12-31",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_system": "BVB_IRIS",
+        "language": "ro",
+        "is_consolidated": true
+      }
+    }
+  ]
+}
