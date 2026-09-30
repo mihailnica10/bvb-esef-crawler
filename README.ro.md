@@ -8,7 +8,7 @@ Versiunea în engleză: [README.md](README.md)
 
 > **Statut juridic.** Acest instrument realizează acces automat la site-urile BVB. Termenii și condițiile publicate de BVB interzic accesul/parsarea automată și cer acordul scris expres al BVB pentru preluarea datelor electronice în orice alt scop decât informarea strict personală. Nu opera acest scraper împotriva BVB la scară mare, programat sau pentru redistribuire până la obținerea acordului. Vezi [LEGAL_DISCLOSURE.md](LEGAL_DISCLOSURE.md) §§2, 4 și 8. Acel document este o analiză, nu consultanță juridică.
 
-Descoperă emitenții din BVB, colectează arhivele ZIP de raportare din istoricul mobil al emitenților și din paginile agregate de raportare, supune fiecare candidat unei probe prin range, descarcă numai pachetele cu conținut iXBRL confirmat, inspectează metadatele pachetelor și
+Descoperă emitenții din BVB, colectează arhivele ZIP de raportare din istoricul mobil al emitenților și din paginile agregate de raportare, supune fiecare candidat unei probe prin range, descarcă pachetele pozitive la probă, păstrează raportările cu conținut iXBRL sau cu identificator LEI (celelalte descărcări sunt omise fără indexare), inspectează metadatele pachetelor și
 exportă `filings.json` / `filings.jsonl` / `companies.json`, cu rezultatele pre-verificărilor locale în `compliance.json` și validare Arelle opțională.
 
 ## Unde sunt fișierele pe BVB

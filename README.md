@@ -8,7 +8,7 @@ Romanian version: [README.ro.md](README.ro.md)
 
 > **Legal status.** This tool performs automated access to BVB websites. BVB's published Terms and Conditions prohibit automated access/parsing and require BVB's express written consent to retrieve electronic data for any non-personal purpose. Do not operate this scraper against BVB at scale, on a schedule, or for redistribution until that consent is obtained. See [LEGAL_DISCLOSURE.md](LEGAL_DISCLOSURE.md) §§2, 4 and 8. That document is analysis, not legal advice.
 
-It discovers issuers from BVB, collects report ZIPs from mobile issuer history and aggregate report pages, range-probes every candidate, downloads only packages with confirmed iXBRL content, inspects package metadata, and exports
+It discovers issuers from BVB, collects report ZIPs from mobile issuer history and aggregate report pages, range-probes every candidate, downloads probe-positive packages, keeps filings with iXBRL content or an LEI identifier (skipping other downloads without indexing them), inspects package metadata, and exports
 `filings.json` / `filings.jsonl` / `companies.json`, with local pre-check results in `compliance.json` and opt-in Arelle validation.
 
 ## Where the files live on BVB

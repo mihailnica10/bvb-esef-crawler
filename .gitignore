@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 venv/
 data/zips/*.zip
+data/zips/*.part
 data/out/*.json
 data/arelle-cache/
 data/out/

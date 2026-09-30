@@ -261,8 +261,11 @@ def probe_remote(client, url: str, head_limit: int = 2,
     if eocd + 22 > len(tail):
         return ProbeResult(False, "truncated central directory")
     cd_size, cd_offset = struct.unpack_from("<II", tail, eocd + 12)
-    if cd_offset >= eocd:
-        blob = tail[tail.find(CD_SIG, 0, eocd):eocd]
+    if cd_size <= 0:
+        return ProbeResult(False, "empty central directory")
+    start = eocd - cd_size
+    if start >= 0 and tail[start:start + 4] == CD_SIG:
+        blob = tail[start:eocd]
     else:
         try:
             blob = _fetch_range(client, url, cd_offset, cd_offset + cd_size - 1)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import hashlib
+import zipfile
 
 from tqdm import tqdm
 
@@ -10,12 +11,25 @@ from .log import log
 from .polite import RateLimiter
 
 
+def _readable_zip(dest: Path) -> bool:
+    try:
+        with zipfile.ZipFile(dest) as z:
+            z.namelist()
+        return True
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
 def download(url: str, dest: Path, timeout: float = 120.0,
              limiter: RateLimiter | None = None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and dest.stat().st_size > 0:
-        log.debug("skip %s (%d bytes on disk)", dest.name, dest.stat().st_size)
-        return dest
+        if _readable_zip(dest):
+            log.debug("skip %s (%d bytes on disk)", dest.name, dest.stat().st_size)
+            return dest
+        log.warning("re-downloading unreadable %s (%d bytes on disk)",
+                    dest.name, dest.stat().st_size)
+        dest.unlink()
     if limiter:
         limiter.wait()
     log.info("download %s", url)

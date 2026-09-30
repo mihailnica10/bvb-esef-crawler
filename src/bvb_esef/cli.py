@@ -36,9 +36,11 @@ def _delay(default: float):
 
 def _year_opts(fn):
     fn = click.option("--from-year", type=int, default=None,
-                      help="Earliest publication year (default: 2022).")(fn)
+                      help="Earliest publication year (backfill/doctor default: "
+                           "2022).")(fn)
     fn = click.option("--to-year", type=int, default=None,
-                      help="Latest publication year (default: this year).")(fn)
+                      help="Latest publication year (backfill/doctor default: this "
+                           "year).")(fn)
     return fn
 
 

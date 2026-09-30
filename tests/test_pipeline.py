@@ -791,7 +791,227 @@ def test_run_arelle_maps_exit_codes(monkeypatch, tmp_path: Path):
     assert "arelle.usage_error" in [f.code for f in findings]
 
     findings, complete, code, _ = val.run_arelle(tmp_path / "p.zip",
-                                                 tmp_path / "cache",
-                                                 authority="3")
+                                                  tmp_path / "cache",
+                                                  authority="3")
     assert code == 3
     assert "arelle.validation_issues" in [f.code for f in findings]
+
+
+def mock_range(monkeypatch, data: bytes):
+    from bvb_esef import esef as esef_mod
+
+    def fake_fetch(client, url, start=None, end=None):
+        if start is None:
+            return data[-esef_mod.TAIL_BYTES:]
+        return data[start:end + 1]
+
+    monkeypatch.setattr(esef_mod, "_fetch_range", fake_fetch)
+    return esef_mod
+
+
+def test_probe_ignores_embedded_directories(tmp_path: Path, monkeypatch):
+    inner = tmp_path / "inner.zip"
+    with zipfile.ZipFile(inner, "w") as z:
+        z.writestr("549300RG3H390KEL8896-2024-12-31-ro.xhtml", "<html>plain</html>")
+        z.writestr("ext.xsd", "<schema/>")
+    outer = tmp_path / "outer.zip"
+    with zipfile.ZipFile(outer, "w", compression=zipfile.ZIP_STORED) as z:
+        z.write(inner, "nested.zip")
+    data = outer.read_bytes()
+    esef_mod = mock_range(monkeypatch, data)
+    result = esef_mod.probe_remote(object(), "https://bvb.ro/infocont/x.zip")
+    assert not result.is_esef
+    assert result.reason == "no xhtml or xsd entries"
+
+
+def test_probe_keeps_genuine_package(tmp_path: Path, monkeypatch):
+    pkg = build_package(tmp_path / "pkg.zip")
+    esef_mod = mock_range(monkeypatch, pkg.read_bytes())
+    result = esef_mod.probe_remote(object(), "https://bvb.ro/infocont/x.zip")
+    assert result.is_esef
+    assert result.has_ixbrl
+
+
+def test_probe_rejects_empty_archive(tmp_path: Path, monkeypatch):
+    empty = tmp_path / "empty.zip"
+    with zipfile.ZipFile(empty, "w"):
+        pass
+    esef_mod = mock_range(monkeypatch, empty.read_bytes())
+    result = esef_mod.probe_remote(object(), "https://bvb.ro/infocont/x.zip")
+    assert not result.is_esef
+
+
+def test_probe_reads_large_central_directory(tmp_path: Path, monkeypatch):
+    from bvb_esef import esef as esef_mod
+
+    big = tmp_path / "big.zip"
+    with zipfile.ZipFile(big, "w") as z:
+        for n in range(1500):
+            z.writestr(f"pad/{n:04d}.txt", "x")
+        z.writestr("549300RG3H390KEL8896-2024-12-31-ro.xhtml", MINIMAL_XHTML)
+        z.writestr("ext.xsd", EXT_XSD)
+    data = big.read_bytes()
+    assert len(data) > esef_mod.TAIL_BYTES
+    mock_range(monkeypatch, data)
+    result = esef_mod.probe_remote(object(), "https://bvb.ro/infocont/x.zip")
+    assert result.is_esef
+    assert result.has_ixbrl
+
+
+def test_probe_reports_unreachable_on_directory_fetch_failure(monkeypatch):
+    from bvb_esef import esef as esef_mod
+
+    def fake_fetch(client, url, start=None, end=None):
+        if start is None:
+            raise OSError("network down")
+        raise AssertionError("must not fetch ranges")
+
+    monkeypatch.setattr(esef_mod, "_fetch_range", fake_fetch)
+    result = esef_mod.probe_remote(object(), "https://bvb.ro/infocont/x.zip")
+    assert not result.is_esef
+    assert not result.reachable
+
+
+def test_redirect_keeps_post_body_on_307():
+    import httpx
+
+    from bvb_esef import net as net_mod
+
+    seen = []
+
+    def fake_request(method, url, **kwargs):
+        seen.append((method, url, kwargs.get("data")))
+        req = httpx.Request(method, url)
+        if url == "https://bvb.ro/start":
+            return httpx.Response(307, headers={"location": "/next"}, request=req)
+        return httpx.Response(200, text="ok", request=req)
+
+    class FakeClient:
+        def request(self, method, url, **kwargs):
+            return fake_request(method, url, **kwargs)
+
+    response = net_mod.post(FakeClient(), "https://bvb.ro/start", data={"a": "b"})
+    assert response.status_code == 200
+    assert seen[1] == ("POST", "https://bvb.ro/next", {"a": "b"})
+
+
+def test_redirect_drops_post_body_on_302():
+    import httpx
+
+    from bvb_esef import net as net_mod
+
+    seen = []
+
+    def fake_request(method, url, **kwargs):
+        seen.append((method, url, kwargs.get("data")))
+        req = httpx.Request("GET", url)
+        if url == "https://bvb.ro/start":
+            return httpx.Response(302, headers={"location": "/next"}, request=req)
+        return httpx.Response(200, text="ok", request=req)
+
+    class FakeClient:
+        def request(self, method, url, **kwargs):
+            return fake_request(method, url, **kwargs)
+
+    response = net_mod.post(FakeClient(), "https://bvb.ro/start", data={"a": "b"})
+    assert response.status_code == 200
+    assert seen[1] == ("GET", "https://bvb.ro/next", None)
+
+
+def test_redirect_to_foreign_host_blocked():
+    import httpx
+
+    from bvb_esef import net as net_mod
+
+    def fake_request(method, url, **kwargs):
+        req = httpx.Request("GET", url)
+        return httpx.Response(302, headers={"location": "https://evil.example.com/"},
+                              request=req)
+
+    class FakeClient:
+        def request(self, method, url, **kwargs):
+            return fake_request(method, url, **kwargs)
+
+    with pytest.raises(BlockedUrl):
+        net_mod.get(FakeClient(), "https://bvb.ro/start")
+
+
+def test_download_replaces_unreadable_file(tmp_path: Path, monkeypatch):
+    import contextlib
+
+    from bvb_esef import downloader as dl_mod
+
+    good = tmp_path / "good.zip"
+    build_package(good)
+    payload = good.read_bytes()
+    calls = []
+
+    class FakeResp:
+        headers = {}
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, chunk_size=None):
+            yield payload
+
+    @contextlib.contextmanager
+    def fake_stream(url, timeout=None):
+        calls.append(url)
+        yield FakeResp()
+
+    monkeypatch.setattr(dl_mod.net, "stream_get", fake_stream)
+    dest = tmp_path / "f.zip"
+    dest.write_bytes(b"not a zip")
+    dl_mod.download("https://bvb.ro/infocont/f.zip", dest)
+    assert calls == ["https://bvb.ro/infocont/f.zip"]
+    with zipfile.ZipFile(dest) as z:
+        assert z.namelist()
+
+
+def test_download_skips_readable_file(tmp_path: Path, monkeypatch):
+    from bvb_esef import downloader as dl_mod
+
+    dest = tmp_path / "f.zip"
+    build_package(dest)
+
+    def fake_stream(url, timeout=None):
+        raise AssertionError("must not download")
+
+    monkeypatch.setattr(dl_mod.net, "stream_get", fake_stream)
+    assert dl_mod.download("https://bvb.ro/infocont/f.zip", dest) == dest
+
+
+def test_ingest_prefers_period_over_today(tmp_path: Path, monkeypatch):
+    from bvb_esef import pipeline as pipe_mod
+
+    zips = tmp_path / "zips"
+    out = tmp_path / "out"
+    zips.mkdir()
+    name = "SFG_315700GSVZ0HSS7J1457-2022-12-31-en.zip"
+    xhtml = ('<html xml:lang="en">'
+             '<ix:header xmlns:ix="http://www.xbrl.org/2013/inlineXBRL">'
+             '</ix:header><body><p>hi</p></body></html>')
+    build_package(zips / name, xhtml=xhtml)
+    monkeypatch.setattr(pipe_mod.dl, "download", lambda url, dest, **kw: dest)
+    hits = [BvbHit("https://bvb.ro/infocont/infocont23/" + name, "t", "SFG", "p")]
+    records, _ = pipe_mod.ingest(hits, out, zips, {"SFG": "Name"}, delay=0,
+                                 arelle=False)
+    assert records[0]["report"]["filing_date"] == "2022-12-31"
+    assert records[0]["report"]["period_end"] == "2022-12-31"
+
+
+def test_financial_results_waits_every_year(monkeypatch):
+    import types
+
+    from bvb_esef import bvb as bvb_mod
+
+    waits = []
+    monkeypatch.setattr(bvb_mod, "post_financial_results_year",
+                        lambda page, year: "")
+    monkeypatch.setattr(bvb_mod, "parse_infocont_links", lambda html, page: [])
+    monkeypatch.setattr(bvb_mod, "RateLimiter",
+                        lambda delay: types.SimpleNamespace(
+                            delay=delay, wait=lambda: waits.append(1)))
+    bvb_mod.crawl_financial_results((2023, 2024), delay=2.0)
+    assert waits == [1, 1]

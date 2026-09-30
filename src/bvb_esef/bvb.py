@@ -95,7 +95,6 @@ def fetch(url: str, client: httpx.Client | None = None,
             r.raise_for_status()
             log.debug("HTTP %s %s (%d bytes)", r.status_code, url, len(r.text))
             return r.text
-        raise httpx.HTTPError(f"gave up on {url}")
     finally:
         if own:
             c.close()
@@ -208,6 +207,7 @@ def crawl_financial_results(years: tuple[int, ...] = (),
     out: list[BvbHit] = []
     per_year: dict[str, int] = {}
     for year in years:
+        limiter.wait()
         try:
             html = post_financial_results_year(BVB_FINANCIAL_RESULTS, str(year))
         except Exception as e:
@@ -218,8 +218,6 @@ def crawl_financial_results(years: tuple[int, ...] = (),
         per_year[str(year)] = len(hits)
         out.extend(hits)
         log.info("FinancialResults %s: %d zips", year, len(hits))
-        if limiter.delay:
-            time.sleep(limiter.delay)
     empty = [y for y, n in per_year.items() if not n]
     log.info("FinancialResults: %d zips across %d years%s",
              len(out), len(per_year),

@@ -175,6 +175,7 @@ def ingest(hits: list[bvb_mod.BvbHit], out_dir: Path, zips_dir: Path,
     limiter = RateLimiter(delay)
     records: list[dict] = []
     compliance: dict[str, dict] = {}
+    skipped: list[str] = []
     for n, h in enumerate(hits, 1):
         fname = dl.filename_for_url(h.filing_url)
         zpath = zips_dir / fname
@@ -190,9 +191,11 @@ def ingest(hits: list[bvb_mod.BvbHit], out_dir: Path, zips_dir: Path,
         info = esef_mod.inspect_zip(zpath)
         if not keep_non_esef and not (info.has_ixbrl or info.lei):
             log.warning("not ESEF after download, skipping: %s", fname)
+            skipped.append(fname)
             continue
-        fdate = filing_date_from_filename(fname) or str(date.today())
-        period_end = info.period_end or extract_period_end(fname) or fdate
+        period_end = info.period_end or extract_period_end(fname)
+        fdate = filing_date_from_filename(fname) or period_end or str(date.today())
+        period_end = period_end or fdate
         digest = dl.sha256(zpath)
         if precheck or arelle:
             result = val.validate(zpath, arelle=arelle, cache_dir=cache_dir,
@@ -211,6 +214,8 @@ def ingest(hits: list[bvb_mod.BvbHit], out_dir: Path, zips_dir: Path,
             sha256=digest,
             language=info.language or meta.DEFAULT_LANGUAGE,
         ))
+    log.info("ingest: %d records, %d compliance entries, %d skipped after download",
+             len(records), len(compliance), len(skipped))
     return records, compliance
 
 

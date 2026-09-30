@@ -61,10 +61,10 @@ def request(c: httpx.Client, method: str, url: str,
         r = c.request(method, target, **kwargs)
         if r.status_code not in REDIRECT_CODES or not r.is_redirect:
             return r
-        kwargs.pop("data", None)
-        kwargs.pop("content", None)
         target, keep = _next(target, r, body)
         if not keep:
+            kwargs.pop("data", None)
+            kwargs.pop("content", None)
             method = "GET"
     raise httpx.TooManyRedirects(f"more than {MAX_REDIRECTS} redirects from {url}")
 
