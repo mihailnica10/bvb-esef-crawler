@@ -4,6 +4,11 @@ __pycache__/
 venv/
 data/zips/*.zip
 data/out/*.json
-!examples/*.json
+data/arelle-cache/
+data/out/
+.ruff_cache/
 .pytest_cache/
 *.egg-info/
+build/
+dist/
+!examples/*.json

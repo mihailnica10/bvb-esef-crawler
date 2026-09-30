@@ -1,15 +1,16 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from urllib.parse import urljoin
 import re
-
 import time
 
-import httpx
 from bs4 import BeautifulSoup
+import httpx
 
-from .config import BVB_BASE, HEADERS
-from .filters import match_reason, is_zip_url, in_years, matches_langs
+from . import net
+from .config import BVB_BASE, BVB_CURRENT_REPORTS, BVB_FINANCIAL_RESULTS, BVB_SHARES
+from .filters import in_years, is_zip_url, matches_langs
 from .log import log
 from .polite import RateLimiter
 
@@ -29,7 +30,6 @@ class Company:
     category: str | None = None
 
 
-SHARES_URL = f"{BVB_BASE}/FinancialInstruments/Markets/Shares"
 SYMBOL_LINK_RE = re.compile(r"FinancialInstrumentsDetails\.aspx\?s=([A-Z0-9]+)")
 CATEGORY_RE = re.compile(r"\b(Premium|Standard|Intl|AeRO)\b", re.IGNORECASE)
 ISIN_RE = re.compile(r"\b(?=[A-Z0-9]*\d)[A-Z]{2}[A-Z0-9]{10}\b")
@@ -80,15 +80,14 @@ def parse_companies(html: str) -> list[Company]:
 def fetch(url: str, client: httpx.Client | None = None,
           limiter: RateLimiter | None = None) -> str:
     own = client is None
-    c = client or httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True)
+    c = client or net.client()
     try:
         for attempt in (1, 2):
             if limiter:
                 limiter.wait()
             log.debug("GET %s", url)
-            r = c.get(url)
+            r = net.get(c, url)
             if r.status_code in (429, 503) and attempt == 1:
-                import time
                 backoff = (limiter.delay if limiter else 1.0) * 5
                 log.warning("HTTP %s on %s, retrying in %.1fs", r.status_code, url, backoff)
                 time.sleep(backoff)
@@ -104,7 +103,7 @@ def fetch(url: str, client: httpx.Client | None = None,
 
 def discover_companies(delay: float = 1.0) -> list[Company]:
     try:
-        companies = parse_companies(fetch(SHARES_URL, limiter=RateLimiter(delay)))
+        companies = parse_companies(fetch(BVB_SHARES, limiter=RateLimiter(delay)))
         log.info("%d companies discovered", len(companies))
         return companies
     except Exception as e:
@@ -141,8 +140,7 @@ def parse_infocont_links(html: str, source_page: str) -> list[BvbHit]:
 
 
 def crawl_bvb_pages(pages: list[str], years: tuple[int, ...] | None = None,
-                    esef_only: bool = False, delay: float = 1.0,
-                    stats: dict | None = None,
+                    delay: float = 1.0, stats: dict | None = None,
                     langs: tuple[str, ...] | None = None) -> list[BvbHit]:
     limiter = RateLimiter(delay)
     out: list[BvbHit] = []
@@ -164,8 +162,6 @@ def crawl_bvb_pages(pages: list[str], years: tuple[int, ...] | None = None,
                 continue
             if not matches_langs(h.filing_url, langs):
                 continue
-            if esef_only and match_reason(h.title, h.filing_url) is None:
-                continue
             kept += 1
             out.append(h)
         log.info("%s: %d zips in range", page, kept)
@@ -176,17 +172,8 @@ def crawl_bvb_pages(pages: list[str], years: tuple[int, ...] | None = None,
     return out
 
 
-def financial_results_years(page: str) -> list[str]:
-    html = fetch(page)
-    soup = BeautifulSoup(html, "lxml")
-    sel = soup.find("select", id="ddYear")
-    if not sel:
-        return []
-    return [o.get("value") for o in sel.find_all("option") if o.get("value")]
-
-
 def post_financial_results_year(page: str, year: str) -> str:
-    with httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True) as client:
+    with net.client() as client:
         html = fetch(page, client)
         soup = BeautifulSoup(html, "lxml")
         form = soup.find("form")
@@ -208,7 +195,7 @@ def post_financial_results_year(page: str, year: str) -> str:
                 data[s.get("name")] = year
                 break
         log.debug("POST %s ddYear=%s", page, year)
-        r = client.post(page, data=data)
+        r = net.post(client, page, data=data)
         r.raise_for_status()
         return r.text
 
@@ -315,7 +302,7 @@ def fetch_issuer_reports(symbol: str, years: tuple[int, ...] | None,
     try:
         limiter.wait()
         log.debug("%s: postback %s", symbol, target)
-        r = client.post(url, data=data)
+        r = net.post(client, url, data=data)
         r.raise_for_status()
     except Exception as e:
         log.warning("%s: reports tab postback failed: %s", symbol, e)
@@ -331,7 +318,7 @@ def crawl_issuers(companies: list[Company], years: tuple[int, ...] | None = None
     limiter = RateLimiter(delay)
     out: list[BvbHit] = []
     empty: list[str] = []
-    with httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True) as client:
+    with net.client() as client:
         for n, c in enumerate(companies, 1):
             log.info("[%d/%d] %s", n, len(companies), c.symbol)
             hits = fetch_issuer_reports(c.symbol, years, limiter, client, langs)
@@ -350,9 +337,8 @@ def crawl_issuers(companies: list[Company], years: tuple[int, ...] | None = None
 
 
 def default_pages(symbols: list[str] | None = None, discover: bool = True,
-                   include_company_pages: bool = False, delay: float = 1.0,
-                   langs: tuple[str, ...] | None = None) -> tuple[list[str], list[Company]]:
-    from .config import BVB_CURRENT_REPORTS, BVB_FINANCIAL_RESULTS
+                   include_company_pages: bool = False,
+                   delay: float = 1.0) -> tuple[list[str], list[Company]]:
     pages = [BVB_CURRENT_REPORTS, BVB_FINANCIAL_RESULTS]
     companies: list[Company] = discover_companies(delay) if discover else []
     extra = {s.upper() for s in (symbols or [])}

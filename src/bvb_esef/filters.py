@@ -1,25 +1,16 @@
 from __future__ import annotations
-import re
 
-from .config import ESEF_KEYWORDS
+import re
 
 LEI_RE = re.compile(r"(?<![0-9A-Z])([0-9A-Z]{18}[0-9]{2})(?![0-9A-Z])")
 PERIOD_RE = re.compile(r"(19|20)\d{2}-\d{2}-\d{2}")
 ZIP_RE = re.compile(r"\.zip(\?.*)?$", re.IGNORECASE)
 TEXT_ENTRY_RE = re.compile(r"\.(xhtml|html|htm)$", re.IGNORECASE)
+LANG_RE = re.compile(r"(?:^|[_\-\s.])(ro|en)(?:[._\-\s]|$)", re.IGNORECASE)
 
 
 def is_zip_url(url: str) -> bool:
     return bool(ZIP_RE.search(url or ""))
-
-
-def match_reason(title: str = "", url: str = "", anchor_text: str = "") -> str | None:
-    blob = f"{title} {url} {anchor_text}".lower()
-    if ".zip" in blob and any(k in blob for k in ESEF_KEYWORDS):
-        return "esef-keyword+zip"
-    if is_zip_url(url) and LEI_RE.search(url.upper()) and PERIOD_RE.search(url):
-        return "lei+date-in-url"
-    return None
 
 
 def esef_entry_name(name: str) -> bool:
@@ -28,19 +19,9 @@ def esef_entry_name(name: str) -> bool:
         and bool(PERIOD_RE.search(base))
 
 
-LANG_RE = re.compile(r"(?:^|[_\-\s.])(ro|en)(?:[._\-\s]|$)", re.IGNORECASE)
-
-
-def looks_like_esef(title: str = "", url: str = "", anchor_text: str = "") -> bool:
-    return match_reason(title, url, anchor_text) is not None
-
-
 def extract_lei(text: str) -> str | None:
     m = LEI_RE.search((text or "").upper())
     return m.group(1) if m else None
-
-
-LANG_RE = re.compile(r"(?:^|[_\-\s.])(ro|en)(?:[._\-\s]|$)", re.IGNORECASE)
 
 
 def language_of(name: str) -> str | None:

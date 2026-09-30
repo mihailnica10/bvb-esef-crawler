@@ -1,9 +1,23 @@
 [project]
 name = "bvb-esef-scraper"
 version = "0.2.0"
-description = "BVB/IRIS ESEF .zip scraper + ingestion pipeline (filings.xbrl.org compatible)"
+description = "BVB ESEF .zip scraper + ingestion pipeline (filings.xbrl.org compatible)"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.md", "LICENSE.ro.md", "GRANT-XBRL.md", "GRANT-XBRL.ro.md"]
 requires-python = ">=3.10"
+keywords = ["esef", "ixbrl", "xbrl", "bvb", "bvb.ro", "filings.xbrl.org", "arelle"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Financial and Insurance Industry",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Office/Business :: Financial",
+]
 dependencies = [
   "httpx>=0.27",
   "beautifulsoup4>=4.12",
@@ -12,7 +26,17 @@ dependencies = [
   "tqdm>=4.66",
   "python-dateutil>=2.9",
 ]
-optional-dependencies = { dev = ["pytest>=8", "ruff>=0.4"] }
+
+[project.urls]
+Homepage = "https://github.com/mihailnica10/bvb-esef-crawler"
+Source = "https://github.com/mihailnica10/bvb-esef-crawler"
+Issues = "https://github.com/mihailnica10/bvb-esef-crawler/issues"
+Repository = "https://github.com/mihailnica10/bvb-esef-crawler.git"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+validate = ["arelle-release>=2.45"]
+validate-css = ["tinycss2>=1.2", "cssselect2>=0.7", "premailer>=3.10"]
 
 [project.scripts]
 bvb-esef = "bvb_esef.cli:main"
@@ -26,3 +50,14 @@ where = ["src"]
 
 [tool.ruff]
 target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+
+[tool.ruff.lint.isort]
+from-first = true
+known-first-party = ["bvb_esef"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

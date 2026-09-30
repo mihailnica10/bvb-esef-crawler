@@ -1,25 +1,26 @@
 # BVB ESEF Scraper & Ingestion Pipeline
 
-Scraper for the ESEF `.zip` packages published through **IRIS / BVB**
+Scraper for the ESEF `.zip` packages published on **BVB**
 (Bucharest Stock Exchange) plus an ingestion pipeline compatible with
 `filings.xbrl.org`.
 
 Romanian version: [README.ro.md](README.ro.md)
 
-It crawls IRIS and `bvb.ro/infocont/infocont{YY}/…`, filters ESEF attachments,
-downloads them, inspects each package (LEI, period end, SHA-256) and exports
-`filings.json` / `filings.jsonl`, with optional Arelle validation.
+> **Legal status.** This tool performs automated access to BVB websites. BVB's published Terms and Conditions prohibit automated access/parsing and require BVB's express written consent to retrieve electronic data for any non-personal purpose. Do not operate this scraper against BVB at scale, on a schedule, or for redistribution until that consent is obtained. See [LEGAL_DISCLOSURE.md](LEGAL_DISCLOSURE.md) §§2, 4 and 8. That document is analysis, not legal advice.
+
+It discovers issuers from BVB, collects report ZIPs from mobile issuer history and aggregate report pages, range-probes every candidate, downloads only packages with confirmed iXBRL content, inspects package metadata, and exports
+`filings.json` / `filings.jsonl` / `companies.json`, with local pre-check results in `compliance.json` and opt-in Arelle validation.
 
 ## Where the files live on BVB
 
-- IRIS feed: `https://iris.bvb.ro/` → *Public Reports* (`/PublicReports/Reports`,
-  server-rendered ASP.NET table `gv_IssuerReports`: Company - Symbol / Title / Date).
-- BVB portal: `https://bvb.ro/` → *Current Reports*
+- Issuer report history: mobile issuer pages,
+  `https://m.bvb.ro/FinancialInstruments/Details/FinancialInstrumentsDetails.aspx?s=SYM`,
+  especially report table `gvRepDoc`.
+- Aggregate listings: `https://bvb.ro/` → *Current Reports*
   (`/FinancialInstruments/SelectedData/CurrentReports`) and *Financial Results*
   (`/FinancialInstruments/SelectedData/FinancialResults`).
 - Attachments: `https://bvb.ro/infocont/infocont{YY}/{FILE_NAME}`
-  (`{YY}` = last two digits of the publication year). Naming convention:
-  `{SYMBOL}_{TIMESTAMP}_{LEI}-{PERIOD_END}-{LANG}.zip`, e.g.
+  (`{YY}` = last two digits of the publication year). Naming varies; for example,
   `EL_20230428175526_213800P4SUNUM5AUDX61-2022-12-31-ro.zip`.
 - Annual reporting in Romania peaks between **March and May**.
 
@@ -28,10 +29,12 @@ downloads them, inspects each package (LEI, period end, SHA-256) and exports
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pip install arelle-release   # optional, ESMA reference engine for ESEF validation
+pip install -e ".[validate,validate-css]"  # optional local Arelle ESEF validation
 ```
 
-Set `BVB_ESEF_CONTACT` to append contact info to the HTTP User-Agent:
+The Arelle cache directory is local and excluded from version control. It must already contain the ESEF core schema and an IFRS entry point before an offline Arelle run; otherwise validation reports the package as skipped rather than as valid or invalid.
+
+Export it before starting the command, because the HTTP headers are constructed when the process starts:
 
 ```bash
 export BVB_ESEF_CONTACT="your-name@example.com"
@@ -47,13 +50,10 @@ bvb-esef companies
 bvb-esef list
 bvb-esef list -s EL --no-discover
 
-# raw IRIS feed (titles, ESEF? flag)
-bvb-esef scan-iris --period m
-
-# full pipeline: data/zips/*.zip + data/out/{filings.json,filings.jsonl,companies.json}
+# full pipeline: data/zips/*.zip + data/out/{filings.json,filings.jsonl,companies.json,compliance.json}
 bvb-esef crawl
 ./scripts/sync.sh
-./scripts/sync.sh --validate
+./scripts/sync.sh --arelle
 
 # backfill 2022..today (merges into the same filings.json, skips existing files)
 bvb-esef backfill
@@ -76,14 +76,11 @@ hardcoded). The response contains `table#gvRepDoc` with the issuer's full report
 history and its `.zip` attachments, back to at least 2012. The desktop
 `bvb.ro/.../FinancialInstrumentsDetails.aspx` pages do not expose this tab.
 
-IRIS is WebForms (`__VIEWSTATE` + `__doPostBack`); `scan-iris` replays the
-`ddlPeriod` post. Attachment details that require JS resolve most faithfully
-with Playwright (watch the *Network* tab).
+The collector checks that every initial and redirected request uses only `bvb.ro` or a `bvb.ro` subdomain before sending it.
 
 ## Language
 
-Most issuers publish every ESEF report in both Romanian and English, so the
-language filter roughly halves the requests a full run makes. It is applied
+Many issuers publish ESEF reports in both Romanian and English. When a run is scoped to one language with `--lang`, collection volume is correspondingly lower. It is applied
 while collecting, so filtered-out packages are never probed or downloaded:
 
 ```bash
@@ -92,49 +89,46 @@ bvb-esef crawl --lang en
 bvb-esef backfill --from-year 2024 --to-year 2026 --lang ro --lang en
 ```
 
-Romanian and English are kept as separate filings (one record per package), and
-duplicate variants of the same filing (same issuer, period and language) are
-collapsed, preferring the iXBRL package. Without `--lang`, both languages are
+Each collected package yields one record per language variant. Where multiple candidates share issuer, period and language, the pipeline prefers the iXBRL variant. Without `--lang`, both languages are
 collected.
 
 ## Rate limits
 
-Every command that hits BVB goes through one sequential `RateLimiter`: a
-minimum delay between HTTP requests, one retry on 429/503, skip-on-error, and
-resume by skipping files already on disk. Tune it per command:
+Every BVB HTTP request goes through one sequential `RateLimiter`: a
+minimum delay between HTTP requests, one retry on 429/503, skip-on-error,
+resume by skipping files already on disk, and redirects rechecked against the BVB-only allowlist. Tune it per command:
 
-| command   | default `--delay` |
-|-----------|-------------------|
-| `list`    | 1.0 s             |
-| `crawl`   | 1.0 s             |
-| `backfill`| 2.0 s             |
-| `scan-iris` | 1.0 s           |
+| command    | default `--delay` |
+|------------|-------------------|
+| `list`     | 1.0 s             |
+| `doctor`   | 1.0 s             |
+| `companies`| 1.0 s             |
+| `crawl`    | 2.0 s             |
+| `backfill` | 2.0 s             |
 
 ```bash
 bvb-esef crawl --delay 2.5
 bvb-esef backfill --delay 5 --limit 50
 ```
 
-The defaults keep a full run (~5 requests daily, ~100+ for backfill with
-company pages) far below anything that could bother BVB's servers.
+The defaults aim for a low request rate (on the order of about five requests for a narrow daily check, and about one hundred or more for a broad backfill), with a single sequential connection and no concurrency. Low impact is an engineering goal, not a legal authorization, and BVB's terms prohibit automated access regardless of rate (see [LEGAL_DISCLOSURE.md](LEGAL_DISCLOSURE.md) §4).
 
 ## Backfill notes
 
-`filings.xbrl.org` holds no Romania data since 2022. `backfill` sweeps the
-available sources, keeps hits whose year (`infocontYY`, `Raportari/YYYY` or the
-period date in the filename) falls in `--from-year..--to-year`, downloads only
+As of 2026-09-30, Romania coverage on `filings.xbrl.org` appeared incomplete for filings since 2022 from manual inspection of its public index. Re-verify before relying on this; the service states its repository "is not complete" (`https://filings.xbrl.org/docs/about`). `backfill` sweeps the
+available sources, keeps hits whose publication URL falls in `--from-year..--to-year`, downloads only
 missing files, and merges records into the existing `filings.json`
-(deduplicated by `filing_url`), so reruns are safe.
+(deduplicated by `filing_url`), so reruns merge by `filing_url` without duplicating existing records.
 
 It also posts back to the `ddYear` selector on the Financial Results page once
 per year in range, and logs a per-year count. Use `--no-sweep-years` to skip
-that.
+that. Publication-year filtering is based on the URL/publication year, not the report's `period_end`.
 
 ### Coverage and history
 
 `bvb-esef doctor` collects and range-probes candidates for the given years
 without downloading anything, and prints the per-source counts so an empty run
-is always explainable:
+is usually diagnosable:
 
 ```bash
 bvb-esef doctor --from-year 2024 --to-year 2026
@@ -151,15 +145,26 @@ inconsistent: real ESEF packages appear both as
 `BRDSocieteGenerale-2025-12-31 ESEF RO xhtml.zip`, none of which name ESEF in
 any usable way. So **every** candidate zip is range-probed: the ZIP central
 directory is read, an XHTML entry is inflated from a byte range, and the package
-is accepted only if iXBRL markup is actually present. Packages are downloaded
-in full only after that probe passes. Pass `--no-probe` to download everything,
+is accepted for download only if iXBRL markup is actually found. After download, each package is re-inspected, and non-iXBRL packages are reported and skipped. Pass `--no-probe` to download everything,
 or `--keep-non-esef` to index non-iXBRL packages anyway.
+
+## Validation
+
+Every ingested package receives a free offline structural pre-check by default. Use `--no-precheck` to skip it. Detailed results are stored in `data/out/compliance.json`, not in the public filing records.
+
+Full Arelle ESEF validation is opt-in because it takes about 60 seconds per package:
+
+```bash
+bvb-esef crawl --arelle
+bvb-esef validate data/zips/EL_*.zip --arelle
+```
+
+Arelle needs the `[validate,validate-css]` extras and a populated local taxonomy cache. If that cache is absent, the run records the package as skipped rather than treating missing-taxonomy errors as ordinary validation failures. Neither the pre-check nor Arelle output is a compliance certificate.
 
 ## Logging
 
 Set the level with `BVB_ESEF_LOGLEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`,
-`CRITICAL`; default `INFO`). `DEBUG` shows every request, every kept link with
-the rule that matched, and every rejected zip with its reason:
+`CRITICAL`; default `INFO`). `DEBUG` shows every request, every probed ZIP with its result, and every rejected ZIP with its reason:
 
 ```bash
 BVB_ESEF_LOGLEVEL=DEBUG bvb-esef backfill --from-year 2024 --to-year 2026
@@ -170,8 +175,7 @@ https://bvb.ro/infocont/infocont23/EL_20230428175526_213800P4SUNUM5AUDX61-2022-1
 https://bvb.ro/infocont/infocont24/COMI_20240528170804_315700NXLBV70RI3NR23-2023-12-31.zip
 ```
 
-Non-ESEF zips listed here are downloaded, reported and skipped, so the file can
-be curated without pre-filtering.
+Packages rejected after download are reported and skipped, not indexed, so the DEBUG list can be curated without pre-filtering.
 
 ## Export schema (`filings.json`)
 
@@ -185,9 +189,10 @@ See `examples/filings.example.json`:
 ```
 
 The parser takes the LEI from the filename or the `<xbrli:identifier>` inside
-`ix:header`, `period_end` from the newest `<xbrli:endDate/instant>` or the
+`ix:header`, the entity name from `dei:EntityRegistrantName` when present, `period_end` from the newest `<xbrli:endDate/instant>` or the
 filename date, the language from the `-ro/-en` suffix, the SHA-256 of the
-downloaded ZIP, and `filing_date` from the BVB timestamp prefix.
+downloaded ZIP, and `filing_date` from the BVB timestamp prefix or fallback date when that prefix is absent.
+`is_consolidated` is currently an assumed default, not a value detected from the report. Detailed pre-check and Arelle results are kept separately in `data/out/compliance.json`, keyed by filing URL.
 
 ## Tests
 
@@ -195,16 +200,18 @@ downloaded ZIP, and `filing_date` from the BVB timestamp prefix.
 pytest -q
 ```
 
+These are offline unit tests. Do not verify the documentation by running broad live crawls against BVB.
+
 ## Daily sync (cron)
 
 ```cron
-0 6 * * * /path/to/bvb-esef-crawler/scripts/sync.sh >> /var/log/bvb-esef.log 2>&1
+0 6 * * * /path/to/bvb-esef-scraper/scripts/sync.sh >> /var/log/bvb-esef.log 2>&1
 ```
 
 ## Handover to filings.xbrl.org
 
 1. Run `bvb-esef crawl` and `bvb-esef backfill --url-file urls.txt`.
-2. Send this repo plus `data/out/filings.json[l]` and `data/out/companies.json`
+2. Only after the consent and licensing position in [LEGAL_DISCLOSURE.md](LEGAL_DISCLOSURE.md) §8 is resolved, send this repo plus `data/out/filings.json[l]`, `data/out/companies.json`, and `data/out/compliance.json`
    to **`filings@xbrl.org`** for integration into the main collector.
 
 ## License
@@ -213,3 +220,5 @@ MIT — see [LICENSE.md](LICENSE.md) ([Romanian](LICENSE.ro.md)). XBRL
 International additionally holds a perpetual, royalty-free grant to use and
 redistribute the output data for `filings.xbrl.org`, recorded in
 [GRANT-XBRL.md](GRANT-XBRL.md) ([Romanian](GRANT-XBRL.ro.md)).
+
+For the project compliance analysis, see [LEGAL_DISCLOSURE.md](LEGAL_DISCLOSURE.md); it does not authorize operation.

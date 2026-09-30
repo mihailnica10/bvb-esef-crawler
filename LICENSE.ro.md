@@ -20,3 +20,5 @@ DREPTURILOR DE AUTOR NU VOR FI RĂSPUNZĂTOR PENTRU NICIO PRETENȚIE, DAUNĂ SAU
 ALTĂ RĂSPUNDERE, FIE ÎNTR-O ACȚIUNE CONTRACTUALĂ, DELICTUALĂ SAU DE ALTĂ
 NATURĂ, REZULTÂND DIN, ÎN LEGĂTURĂ CU SAU DIN UTILIZAREA SOFTWARE-ULUI SAU DIN
 ALTE TRANZACȚII CU SOFTWARE-UL.
+
+*Notă: aceasta este o traducere în limba română a licenței MIT, oferită numai pentru comoditate. În caz de conflict, textul în limba engleză din `LICENSE.md` prevalează.*

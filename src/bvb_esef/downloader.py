@@ -1,16 +1,16 @@
 from __future__ import annotations
-import hashlib
-from pathlib import Path
 
-import httpx
+from pathlib import Path
+import hashlib
+
 from tqdm import tqdm
 
-from .config import HEADERS
+from . import net
 from .log import log
 from .polite import RateLimiter
 
 
-def download(url: str, dest: Path, timeout: int = 120,
+def download(url: str, dest: Path, timeout: float = 120.0,
              limiter: RateLimiter | None = None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and dest.stat().st_size > 0:
@@ -20,8 +20,7 @@ def download(url: str, dest: Path, timeout: int = 120,
         limiter.wait()
     log.info("download %s", url)
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with httpx.stream("GET", url, headers=HEADERS, timeout=timeout,
-                      follow_redirects=True) as r:
+    with net.stream_get(url, timeout=timeout) as r:
         r.raise_for_status()
         total = int(r.headers.get("content-length", 0) or 0)
         with open(tmp, "wb") as f, tqdm(total=total, unit="B",

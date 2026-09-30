@@ -1,13 +1,16 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
+import html as html_mod
 import re
 import struct
 import zipfile
 import zlib
 
-from .filters import (extract_lei, extract_period_end, esef_entry_name,
-                      language_of)
+from . import net
+from .filters import esef_entry_name, extract_lei, extract_period_end, language_of
+from .log import log
 
 IDENTIFIER_RE = re.compile(
     r"<(?:link:schemaRef|xbrli:identifier|identifier)[^>]*>\s*([0-9A-Z]{18}[0-9]{2})\s*<",
@@ -19,12 +22,36 @@ IXHDR_RE = re.compile(r"<ix:header", re.IGNORECASE)
 IXBRL_RE = re.compile(r"(?:xmlns:ix=|in\s+XBRL|iXBRL|xbrli:context)", re.IGNORECASE)
 TEXT_ENTRY_RE = re.compile(r"\.(xhtml|html|htm)$", re.IGNORECASE)
 SCHEMA_ENTRY_RE = re.compile(r"\.(xsd)$", re.IGNORECASE)
+PUBLISHER_RE = re.compile(r"<publisher>(.*?)</publisher>", re.DOTALL)
+LEI_SCHEME = "http://standards.iso.org/iso/17442"
+ENTITY_LEI_RE = re.compile(
+    r"<(?:[\w.\-]+:)?identifier\b[^>]*\bscheme\s*=\s*[\"']" + re.escape(LEI_SCHEME)
+    + r"[\"'][^>]*>\s*([0-9A-Z]{18}[0-9]{2})\s*<", re.IGNORECASE)
+LEI_LABEL_RE = re.compile(r"LEI\s*:?\s*([0-9A-Z]{18}[0-9]{2})")
+Q = r"[\"']"
 
 EOCD_SIG = b"PK\x05\x06"
 CD_SIG = b"PK\x01\x02"
 LOCAL_SIG = b"PK\x03\x04"
 TAIL_BYTES = 65536
-MAX_ENTRY_BYTES = 3_000_000
+
+
+def sanitize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", html_mod.unescape(text or "")).strip()
+
+
+def dei_fact(text: str, name: str) -> str | None:
+    pattern = r"name\s*=\s*" + Q + r"(?:[\w.\-]+:)?" + name + Q + r"[^>]*>(.*?)</"
+    m = re.search(pattern, text or "", re.DOTALL)
+    return sanitize_text(m.group(1)) or None if m else None
+
+
+def primary_report(entries: list[str]) -> str | None:
+    docs = [n for n in entries
+            if TEXT_ENTRY_RE.search(n) and not SCHEMA_ENTRY_RE.search(n)]
+    if not docs:
+        return None
+    return min(docs, key=lambda n: (n.count("/"), -len(n), n))
 
 
 @dataclass
@@ -36,6 +63,22 @@ class EsefInfo:
     xhtml_files: list[str] = field(default_factory=list)
     taxonomy_files: list[str] = field(default_factory=list)
     all_files: list[str] = field(default_factory=list)
+    registrant_name: str | None = None
+    central_index_key: str | None = None
+    document_type: str | None = None
+    entity_lei: str | None = None
+    publisher: str | None = None
+
+    @property
+    def claimed_lei(self) -> str | None:
+        return self.central_index_key or self.entity_lei
+
+    @property
+    def display_name(self) -> str | None:
+        return self.registrant_name or self.publisher
+
+    def lei_mismatch(self) -> bool:
+        return bool(self.lei and self.claimed_lei and self.lei != self.claimed_lei)
 
 
 @dataclass
@@ -66,6 +109,33 @@ def classify_names(names: list[str]) -> str:
     return "xsd only"
 
 
+def _read_taxonomy_package(z: zipfile.ZipFile, names: list[str]) -> str:
+    for name in names:
+        if name.rsplit("/", 1)[-1].lower() != "taxonomypackage.xml":
+            continue
+        try:
+            return z.read(name).decode("utf-8", errors="ignore")
+        except (KeyError, OSError):
+            return ""
+    return ""
+
+
+def _absorb_identity(info: EsefInfo, text: str) -> None:
+    for attr, name in (("registrant_name", "EntityRegistrantName"),
+                       ("central_index_key", "EntityCentralIndexKey"),
+                       ("document_type", "DocumentType")):
+        if getattr(info, attr) is None:
+            setattr(info, attr, dei_fact(text, name))
+    if info.entity_lei is None:
+        m = ENTITY_LEI_RE.search(text)
+        if m:
+            info.entity_lei = m.group(1).upper()
+    if info.entity_lei is None:
+        m = LEI_LABEL_RE.search(text)
+        if m:
+            info.entity_lei = m.group(1).upper()
+
+
 def inspect_zip(path: Path) -> EsefInfo:
     info = EsefInfo()
     fname = path.name
@@ -76,10 +146,13 @@ def inspect_zip(path: Path) -> EsefInfo:
         with zipfile.ZipFile(path) as z:
             names = z.namelist()
             info.all_files = names
-            info.xhtml_files = [n for n in names
-                                if TEXT_ENTRY_RE.search(n)]
+            info.xhtml_files = [n for n in names if TEXT_ENTRY_RE.search(n)]
             info.taxonomy_files = [n for n in names
                                    if n.lower().endswith((".xsd", ".xml", ".xbrl"))]
+            package_meta = _read_taxonomy_package(z, names)
+            m_pub = PUBLISHER_RE.search(package_meta)
+            if m_pub:
+                info.publisher = sanitize_text(m_pub.group(1)) or None
             for x in info.xhtml_files[:3]:
                 if not info.language:
                     info.language = language_of(x)
@@ -93,7 +166,7 @@ def inspect_zip(path: Path) -> EsefInfo:
                         info.period_end = found
                 try:
                     text = z.read(x).decode("utf-8", errors="ignore")
-                except KeyError:
+                except (KeyError, OSError):
                     continue
                 if IXHDR_RE.search(text):
                     info.has_ixbrl = True
@@ -103,19 +176,25 @@ def inspect_zip(path: Path) -> EsefInfo:
                         info.lei = mm.group(1).upper()
                 dates = PERIOD_RE.findall(text)
                 if dates:
-                    latest = sorted(dates)[-1]
+                    latest = max(dates)
                     if not info.period_end or latest > info.period_end:
                         info.period_end = latest
-                if info.has_ixbrl and info.lei and info.period_end:
+                _absorb_identity(info, text)
+                if (info.has_ixbrl and info.lei and info.period_end
+                        and info.registrant_name and info.central_index_key):
                     break
-    except zipfile.BadZipFile:
-        pass
+    except (OSError, zipfile.BadZipFile) as e:
+        log.debug("inspect_zip %s: %s", path.name, e)
+    if info.lei_mismatch():
+        log.warning("%s: filename LEI %s disagrees with report LEI %s", fname, info.lei,
+                    info.claimed_lei)
+    elif info.lei and info.claimed_lei:
+        log.debug("%s: LEI %s confirmed by the report", fname, info.lei)
     return info
 
 
 def _find_eocd(tail: bytes) -> int:
-    idx = tail.rfind(EOCD_SIG)
-    return idx
+    return tail.rfind(EOCD_SIG)
 
 
 def _parse_central_directory(blob: bytes) -> list[tuple[str, int, int, int]]:
@@ -140,12 +219,11 @@ def _parse_central_directory(blob: bytes) -> list[tuple[str, int, int, int]]:
 
 def _fetch_range(client, url: str, start: int | None = None,
                  end: int | None = None) -> bytes:
-    headers = {}
     if start is None:
-        headers["Range"] = f"bytes=-{TAIL_BYTES}"
+        headers = {"Range": f"bytes=-{TAIL_BYTES}"}
     else:
-        headers["Range"] = f"bytes={start}-{'' if end is None else end}"
-    r = client.get(url, headers=headers)
+        headers = {"Range": f"bytes={start}-{'' if end is None else end}"}
+    r = net.get(client, url, headers=headers)
     r.raise_for_status()
     return r.content
 
@@ -202,9 +280,8 @@ def probe_remote(client, url: str, head_limit: int = 2,
     text_entries = sorted(
         (e for e in entries if TEXT_ENTRY_RE.search(e[0])),
         key=lambda e: e[2], reverse=True)
-    for name, method, comp_size, local_off in text_entries[:head_limit]:
-        data = _read_entry_head(client, url, method, comp_size, local_off,
-                                sniff_bytes)
+    for _name, method, comp_size, local_off in text_entries[:head_limit]:
+        data = _read_entry_head(client, url, method, comp_size, local_off, sniff_bytes)
         if not data:
             continue
         head = data.decode("utf-8", errors="ignore")

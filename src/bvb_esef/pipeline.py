@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -9,13 +10,16 @@ from . import bvb as bvb_mod
 from . import downloader as dl
 from . import esef as esef_mod
 from . import metadata as meta
-from .filters import extract_period_end, year_of, language_of
+from . import net
+from . import validate as val
+from .filters import extract_period_end, year_of
 from .log import log
 from .polite import RateLimiter
 
 FNAME_DATE_RE = re.compile(r"_(\d{4})(\d{2})(\d{2})\d{6}_")
 ROMAN_DATE_RE = re.compile(r"\b(\d{2})-(\d{2})-((?:19|20)\d{2})\b")
 INFOCONT_RE = re.compile(r"infocont(\d{2})")
+LANG_IN_NAME_RE = re.compile(r"[_\-\s](ro|en)(?:[._\-\s]|$)", re.IGNORECASE)
 
 
 def filing_date_from_filename(fname: str) -> str | None:
@@ -77,22 +81,23 @@ def collect(from_year: int | None = None, to_year: int | None = None,
             langs: tuple[str, ...] | None = None) -> Collection:
     years = None
     if from_year or to_year:
-        lo = from_year or from_year
+        lo = from_year or to_year
         hi = to_year or date.today().year
+        if lo > hi:
+            raise ValueError(f"from_year {lo} is after to_year {hi}")
         years = tuple(range(lo, hi + 1))
         log.info("collecting zips for years %d..%d", lo, hi)
     if langs:
         log.info("language filter: %s", ", ".join(langs))
-    pages, companies = bvb_mod.default_pages(symbols, discover=discover,
-                                             delay=delay, langs=langs)
+    pages, companies = bvb_mod.default_pages(symbols, discover=discover, delay=delay)
     result = Collection(companies=companies)
     if aggregate_pages:
         result.hits += bvb_mod.crawl_bvb_pages(pages, years=years, delay=delay,
-                                               stats=result.stats, langs=langs)
+                                                stats=result.stats, langs=langs)
     if issuer_pages and companies:
         result.hits += bvb_mod.crawl_issuers(companies, years=years,
-                                             delay=delay, stats=result.stats,
-                                             langs=langs)
+                                              delay=delay, stats=result.stats,
+                                              langs=langs)
     elif not issuer_pages:
         log.info("issuer report tabs skipped")
     if sweep_years and years:
@@ -113,9 +118,6 @@ def write_companies(companies: list, out_dir: Path) -> None:
     log.info("%d issuers → %s", len(companies), out_dir / "companies.json")
 
 
-LANG_IN_NAME_RE = re.compile(r"[_\-\s](ro|en)(?:[._\-\s]|$)", re.IGNORECASE)
-
-
 def _filing_key(hit: bvb_mod.BvbHit) -> tuple:
     fname = hit.filing_url.rsplit("/", 1)[-1]
     period = extract_period_end(fname) or year_of(hit.filing_url) or ""
@@ -125,14 +127,12 @@ def _filing_key(hit: bvb_mod.BvbHit) -> tuple:
 
 def probe_candidates(hits: list[bvb_mod.BvbHit], delay: float = 2.0,
                      limit: int = 0) -> tuple[list[bvb_mod.BvbHit], list[tuple]]:
-    import httpx
-    from .config import HEADERS
     limiter = RateLimiter(delay)
     if limit:
         hits = hits[:limit]
     best: dict[tuple, tuple[bvb_mod.BvbHit, bool]] = {}
     rejected: list[tuple] = []
-    with httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True) as client:
+    with net.client() as client:
         for n, h in enumerate(hits, 1):
             if limiter:
                 limiter.wait()
@@ -164,18 +164,26 @@ def probe_candidates(hits: list[bvb_mod.BvbHit], delay: float = 2.0,
     return keep, rejected
 
 
+def registrant_name(info: esef_mod.EsefInfo, fallback: str | None) -> str:
+    return info.display_name or fallback or info.lei or meta.UNKNOWN
+
+
 def ingest(hits: list[bvb_mod.BvbHit], out_dir: Path, zips_dir: Path,
-           names: dict, delay: float = 2.0, validate: bool = False,
-           keep_non_esef: bool = False) -> list[dict]:
-    from .validate import validate as _validate
+           names: dict, delay: float = 2.0, precheck: bool = True,
+           arelle: bool = False, cache_dir: Path | None = None,
+           keep_non_esef: bool = False) -> tuple[list[dict], dict[str, dict]]:
     limiter = RateLimiter(delay)
     records: list[dict] = []
+    compliance: dict[str, dict] = {}
     for n, h in enumerate(hits, 1):
         fname = dl.filename_for_url(h.filing_url)
         zpath = zips_dir / fname
         log.info("[%d/%d] %s", n, len(hits), fname)
         try:
             dl.download(h.filing_url, zpath, limiter=limiter)
+        except net.BlockedUrl as e:
+            log.error("refusing to download %s: %s", h.filing_url, e)
+            continue
         except Exception as e:
             log.error("download failed %s: %s", h.filing_url, e)
             continue
@@ -185,23 +193,25 @@ def ingest(hits: list[bvb_mod.BvbHit], out_dir: Path, zips_dir: Path,
             continue
         fdate = filing_date_from_filename(fname) or str(date.today())
         period_end = info.period_end or extract_period_end(fname) or fdate
-        if validate:
-            ok, vlog = _validate(zpath)
-            log.info("validate %s: %s", fname, "OK" if ok else "FAIL")
-            if not ok:
-                out_dir.mkdir(parents=True, exist_ok=True)
-                (out_dir / f"{zpath.stem}.validation.log").write_text(vlog)
+        digest = dl.sha256(zpath)
+        if precheck or arelle:
+            result = val.validate(zpath, arelle=arelle, cache_dir=cache_dir,
+                                  lang=info.language)
+            compliance[h.filing_url] = {"filing_url": h.filing_url, "sha256": digest,
+                                        "path": str(zpath), **result.summary()}
+            log.info("validate %s -> %s (%d errors, %d warnings)", fname,
+                     result.status, len(result.errors), len(result.warnings))
         records.append(meta.filing_record(
-            lei=info.lei or "UNKNOWN",
-            name=names.get(h.symbol or "") or h.symbol or "UNKNOWN",
+            lei=info.lei or meta.UNKNOWN,
+            name=registrant_name(info, names.get(h.symbol or "")),
             ticker=h.symbol,
             filing_url=h.filing_url,
             filing_date=fdate,
             period_end=period_end,
-            sha256=dl.sha256(zpath),
-            language=info.language or "ro",
+            sha256=digest,
+            language=info.language or meta.DEFAULT_LANGUAGE,
         ))
-    return records
+    return records, compliance
 
 
 def store(records: list[dict], out_dir: Path, merge: bool = True) -> list[dict]:
@@ -216,17 +226,29 @@ def store(records: list[dict], out_dir: Path, merge: bool = True) -> list[dict]:
     return records
 
 
+def store_compliance(entries: dict[str, dict], out_dir: Path,
+                     merge: bool = True) -> Path:
+    dest = out_dir / "compliance.json"
+    merged = meta.read_compliance(dest) if merge else {}
+    merged.update(entries)
+    meta.write_compliance(merged, dest)
+    log.info("wrote %d compliance entries → %s", len(merged), dest)
+    return dest
+
+
 def run(out_dir: Path, zips_dir: Path, from_year: int | None = None,
         to_year: int | None = None, url_file: Path | None = None,
         symbols: list[str] | None = None, discover: bool = True,
         issuer_pages: bool = True, sweep_years: bool = True,
-        aggregate_pages: bool = True, validate: bool = False,
-        keep_non_esef: bool = False, no_probe: bool = False,
-        limit: int = 0, delay: float = 2.0) -> list[dict]:
+        aggregate_pages: bool = True, precheck: bool = True,
+        arelle: bool = False, cache_dir: Path | None = None,
+        keep_non_esef: bool = False, probe: bool = True, limit: int = 0,
+        delay: float = 2.0,
+        langs: tuple[str, ...] | None = None) -> list[dict]:
     found = collect(from_year=from_year, to_year=to_year, symbols=symbols,
                     discover=discover, issuer_pages=issuer_pages,
                     sweep_years=sweep_years, aggregate_pages=aggregate_pages,
-                    delay=delay)
+                    delay=delay, langs=langs)
     write_companies(found.companies, out_dir)
     hits = found.hits
     if url_file:
@@ -242,6 +264,12 @@ def run(out_dir: Path, zips_dir: Path, from_year: int | None = None,
         hits, _ = probe_candidates(hits, delay=delay, limit=limit)
     elif limit:
         hits = hits[:limit]
-    return store(ingest(hits, out_dir, zips_dir, found.symbols, delay=delay,
-                        validate=validate, keep_non_esef=keep_non_esef),
-                 out_dir, merge=True)
+    if arelle and not val.arelle_available():
+        log.warning("--arelle requested but Arelle is not installed; "
+                    "pre-check only (pip install 'bvb-esef-scraper[validate]')")
+    records, compliance = ingest(hits, out_dir, zips_dir, found.symbols, delay=delay,
+                                 precheck=precheck, arelle=arelle,
+                                 cache_dir=cache_dir, keep_non_esef=keep_non_esef)
+    if compliance:
+        store_compliance(compliance, out_dir)
+    return store(records, out_dir, merge=True)
